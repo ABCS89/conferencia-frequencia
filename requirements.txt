@@ -1,0 +1,4 @@
+pdfplumber
+openpyxl
+pypdfium2
+winocr

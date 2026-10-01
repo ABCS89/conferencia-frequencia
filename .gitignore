@@ -1,0 +1,10 @@
+# Dados sensíveis (relatórios oficiais, frequências e retificações)
+input/
+output/
+
+# Cache Python e ambientes virtuais
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
