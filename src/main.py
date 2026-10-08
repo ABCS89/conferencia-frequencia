@@ -26,7 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from extract_secretaria import extrair as extrair_secretaria, extrair_cabecalho
 from extract_sistema import extrair as extrair_sistema
 from compare import comparar_por_dia
-from desligados import localizar_e_carregar_desligados
+from desligados import localizar_e_carregar_desligados, normalizar_matricula
 from monitoring import (
     apurar_dados_monitoramento,
     gerar_markdown_monitoramento,
@@ -56,6 +56,7 @@ COR_SEM_REGISTRO_SECRETARIA = "FFF2CC"   # secretaria não tinha nada -> precisa
 COR_SEM_REGISTRO_SISTEMA = "D9E1F2"      # sistema não tinha nada -> conferir/lançar lá
 COR_TIPO_DIFERENTE = "F8CBAD"            # os dois têm algo, mas tipos diferentes
 COR_SOBREPOSICAO = "E1D5E7"              # lilás: sobreposição de eventos na mesma data
+COR_REGULARIZADO = "E2EFDA"              # verde suave: regularizado por memorando
 
 MESES_PT = ["", "janeiro", "fevereiro", "março", "abril", "maio", "junho",
             "julho", "agosto", "setembro", "outubro", "novembro", "dezembro"]
@@ -69,6 +70,8 @@ def sanitizar_nome_arquivo(texto):
 
 
 def _cor_da_linha(r):
+    if r.get("regularizado_memorando"):
+        return COR_REGULARIZADO
     if r.get("sobreposicao"):
         return COR_SOBREPOSICAO
     if r["tipo_secretaria"] == "SEM REGISTRO":
@@ -115,7 +118,7 @@ def _eh_divergencia_secretaria(r):
     return True
 
 
-def gerar_excel(retificacoes, sobreposicoes, caminho_saida, total_sec, total_sis, mes_label, nome_orgao=""):
+def gerar_excel(retificacoes, sobreposicoes, caminho_saida, total_sec, total_sis, mes_label, nome_orgao="", itens_regularizados=None):
     wb = Workbook()
 
     ws = wb.active
@@ -128,34 +131,45 @@ def gerar_excel(retificacoes, sobreposicoes, caminho_saida, total_sec, total_sis
         cel.fill = PatternFill("solid", fgColor=COR_CABECALHO)
         cel.alignment = Alignment(horizontal="center")
 
+    chaves_reg = {(normalizar_matricula(a["matricula"]), a["data_inicio"], a["data_fim"]) for a in (itens_regularizados or [])}
+
     ret_divergencias = [r for r in retificacoes if _eh_divergencia_secretaria(r)]
     ret_sem_registro = [r for r in retificacoes if not _eh_divergencia_secretaria(r)]
+    ret_pendentes = [r for r in ret_divergencias if (normalizar_matricula(r["matricula"]), r["data_inicio"], r["data_fim"]) not in chaves_reg]
 
     # Ordena colocando divergências primeiro, depois servidores sem registro na secretaria / a inserir no sistema
     ret_ordenadas = ret_divergencias + ret_sem_registro
 
     for r in ret_ordenadas:
-        obs_texto = r.get("observacao", "")
-        if r["tipo_secretaria"] == "SEM REGISTRO" and not obs_texto:
+        ch_r = (normalizar_matricula(r["matricula"]), r["data_inicio"], r["data_fim"])
+        foi_reg = ch_r in chaves_reg
+        r_copia = dict(r)
+        if foi_reg:
+            r_copia["regularizado_memorando"] = True
+
+        obs_texto = r_copia.get("observacao", "")
+        if r_copia["tipo_secretaria"] == "SEM REGISTRO" and not obs_texto:
             obs_texto = "Sem registro na secretaria (verificar possível desligamento/situação funcional)"
-        elif _eh_lancamento_somente_sec(r) and not obs_texto:
-            tipo_label = "Falta informada" if "falta" in r["tipo_secretaria"].lower() else "Minutos perdidos informados"
+        elif _eh_lancamento_somente_sec(r_copia) and not obs_texto:
+            tipo_label = "Falta informada" if "falta" in r_copia["tipo_secretaria"].lower() else "Minutos perdidos informados"
             obs_texto = f"{tipo_label} pela secretaria (inserir no sistema)"
 
-        if r.get("instrucao_direta") and obs_texto:
-            obs_col = f"{r['instrucao_direta'].capitalize()} | {obs_texto}"
-        elif r.get("instrucao_direta"):
-            obs_col = r["instrucao_direta"].capitalize()
+        if foi_reg:
+            obs_col = f"Regularizado por memorando de retificação | {obs_texto}" if obs_texto else "Regularizado por memorando de retificação"
+        elif r_copia.get("instrucao_direta") and obs_texto:
+            obs_col = f"{r_copia['instrucao_direta'].capitalize()} | {obs_texto}"
+        elif r_copia.get("instrucao_direta"):
+            obs_col = r_copia["instrucao_direta"].capitalize()
         else:
             obs_col = obs_texto
 
         ws.append([
-            r["matricula"], r["nome"],
-            r["data_inicio"].strftime("%d/%m/%Y"), r["data_fim"].strftime("%d/%m/%Y"),
-            r["dias"], r["tipo_secretaria"], r["tipo_sistema"],
+            r_copia["matricula"], r_copia["nome"],
+            r_copia["data_inicio"].strftime("%d/%m/%Y"), r_copia["data_fim"].strftime("%d/%m/%Y"),
+            r_copia["dias"], r_copia["tipo_secretaria"], r_copia["tipo_sistema"],
             obs_col,
         ])
-        cor = _cor_da_linha(r)
+        cor = _cor_da_linha(r_copia)
         for cel in ws[ws.max_row]:
             cel.fill = PatternFill("solid", fgColor=cor)
 
@@ -197,12 +211,17 @@ def gerar_excel(retificacoes, sobreposicoes, caminho_saida, total_sec, total_sis
     ws2.append(["Mês de referência", mes_label])
     ws2.append(["Registros extraídos (secretaria)", total_sec])
     ws2.append(["Registros extraídos (sistema)", total_sis])
-    ws2.append(["Total de retificações (a cargo da secretaria)", len(ret_divergencias)])
+    ws2.append(["Total de retificações solicitadas à secretaria", len(ret_divergencias)])
+    if itens_regularizados:
+        ws2.append(["Regularizadas por memorando recebido", len(itens_regularizados)])
+        ws2.append(["Pendentes de retificação pela secretaria", len(ret_pendentes)])
     ws2.append(["Servidores sem registro na frequência / a inserir no sistema", len(ret_sem_registro)])
     ws2.append(["Sobreposições de eventos detectadas", len(sobreposicoes)])
     ws2.append([])
     ws2.append(["Legenda de cores", ""])
-    ws2["A11"].font = Font(bold=True)
+    ws2["A11" if not itens_regularizados else "A13"].font = Font(bold=True)
+    if itens_regularizados:
+        ws2.append(["Verde suave", "ocorrência regularizada pelo memorando de retificação"])
     ws2.append(["Amarelo", "secretaria não tinha esse servidor na folha (verificar desligamento)"])
     ws2.append(["Azul", "sistema não tem nada nesse dia (conferir se é pra lançar lá)"])
     ws2.append(["Laranja", "os dois têm algo lançado, mas de tipo diferente"])
@@ -214,7 +233,7 @@ def gerar_excel(retificacoes, sobreposicoes, caminho_saida, total_sec, total_sis
     wb.save(caminho_saida)
 
 
-def gerar_txt(retificacoes, sobreposicoes, caminho_saida):
+def gerar_txt(retificacoes, sobreposicoes, caminho_saida, itens_regularizados=None):
     linhas = []
     if sobreposicoes:
         linhas.append("=== ATENÇÃO: SOBREPOSIÇÃO DE EVENTOS NA MESMA DATA ===")
@@ -224,8 +243,9 @@ def gerar_txt(retificacoes, sobreposicoes, caminho_saida):
             linhas.append(f"- {s['matricula']} - {s['nome']} - {dias_txt} ({s['dias']} dia{'s' if s['dias'] != 1 else ''}) - {s['origem']}: {s['eventos']}")
         linhas.append("")
 
-    ret_divergencias = [r for r in retificacoes if _eh_divergencia_secretaria(r)]
-    ret_sem_registro = [r for r in retificacoes if not _eh_divergencia_secretaria(r)]
+    chaves_reg = {(normalizar_matricula(a["matricula"]), a["data_inicio"], a["data_fim"]) for a in (itens_regularizados or [])}
+    ret_divergencias = [r for r in retificacoes if _eh_divergencia_secretaria(r) and (normalizar_matricula(r["matricula"]), r["data_inicio"], r["data_fim"]) not in chaves_reg]
+    ret_sem_registro = [r for r in retificacoes if not _eh_divergencia_secretaria(r) and (normalizar_matricula(r["matricula"]), r["data_inicio"], r["data_fim"]) not in chaves_reg]
 
     if ret_divergencias:
         linhas.append("=== RETIFICAÇÕES A REALIZAR ===")
@@ -250,7 +270,7 @@ def gerar_txt(retificacoes, sobreposicoes, caminho_saida):
         f.write("\n".join(linhas) + "\n")
 
 
-def gerar_markdown(retificacoes, sobreposicoes, caminho_saida, mes_label, total_sec, total_sis, nome_orgao="", secao_memorando=None):
+def gerar_markdown(retificacoes, sobreposicoes, caminho_saida, mes_label, total_sec, total_sis, nome_orgao="", secao_memorando=None, itens_regularizados=None):
     linhas = []
     titulo = f"# Retificações de Frequência — {nome_orgao} ({mes_label})" if nome_orgao else f"# Retificações de Frequência ({mes_label})"
     linhas.append(titulo)
@@ -262,10 +282,20 @@ def gerar_markdown(retificacoes, sobreposicoes, caminho_saida, mes_label, total_
     linhas.append(f"- Registros extraídos (secretaria): {total_sec}")
     linhas.append(f"- Registros extraídos (sistema): {total_sis}")
 
-    ret_divergencias = [r for r in retificacoes if _eh_divergencia_secretaria(r)]
-    ret_sem_registro = [r for r in retificacoes if not _eh_divergencia_secretaria(r)]
+    chaves_reg = {(normalizar_matricula(a["matricula"]), a["data_inicio"], a["data_fim"]) for a in (itens_regularizados or [])}
+    ret_divergencias_total = [r for r in retificacoes if _eh_divergencia_secretaria(r)]
+    ret_divergencias = [r for r in ret_divergencias_total if (normalizar_matricula(r["matricula"]), r["data_inicio"], r["data_fim"]) not in chaves_reg]
 
-    linhas.append(f"- **Total de retificações: {len(ret_divergencias)}**")
+    ret_sem_registro_total = [r for r in retificacoes if not _eh_divergencia_secretaria(r)]
+    ret_sem_registro = [r for r in ret_sem_registro_total if (normalizar_matricula(r["matricula"]), r["data_inicio"], r["data_fim"]) not in chaves_reg]
+
+    if itens_regularizados:
+        linhas.append(f"- **Retificações solicitadas inicialmente: {len(ret_divergencias_total)}**")
+        linhas.append(f"- **Regularizadas pelo memorando recebido: {len(itens_regularizados)}**")
+        linhas.append(f"- **Retificações pendentes a realizar: {len(ret_divergencias)}**")
+    else:
+        linhas.append(f"- **Total de retificações: {len(ret_divergencias)}**")
+
     if ret_sem_registro:
         tem_inserir = any(_eh_lancamento_somente_sec(r) for r in ret_sem_registro)
         rotulo_sem_reg = "Servidores sem registro na frequência / a inserir no sistema" if tem_inserir else "Servidores sem registro na frequência (a verificar)"
@@ -300,7 +330,7 @@ def gerar_markdown(retificacoes, sobreposicoes, caminho_saida, mes_label, total_
         linhas.append("")
     elif secao_memorando:
         linhas.append("## Retificações a Realizar")
-        linhas.append("*(Nenhuma retificação pendente identificada entre o relatório da secretaria e o sistema)*")
+        linhas.append("*(Todas as retificações a cargo da secretaria foram regularizadas pelo memorando!)*")
         linhas.append("")
 
     if ret_sem_registro:
@@ -430,17 +460,17 @@ def processar_par(caminho_secretaria, caminho_sistema, ano_mes=None, desligados=
 
     nome_saida = sanitizar_nome_arquivo(nome_orgao)
     caminho_xlsx = dir_conferencia / f"conferencia_{nome_saida}.xlsx"
-    gerar_excel(retificacoes, sobreposicoes, str(caminho_xlsx), len(regs_sec), len(regs_sis), mes_label, nome_orgao=nome_orgao)
+    gerar_excel(retificacoes, sobreposicoes, str(caminho_xlsx), len(regs_sec), len(regs_sis), mes_label, nome_orgao=nome_orgao, itens_regularizados=itens_atendidos_memo)
     print(f"[OK] Excel salvo em: {caminho_xlsx.relative_to(BASE_DIR)}")
 
     caminho_md = dir_retificacoes / f"retificacoes_{nome_saida}.md"
     caminho_txt = dir_retificacoes / f"retificacoes_{nome_saida}.txt"
 
     if retificacoes or sobreposicoes or secao_memo:
-        gerar_markdown(retificacoes, sobreposicoes, str(caminho_md), mes_label, len(regs_sec), len(regs_sis), nome_orgao=nome_orgao, secao_memorando=secao_memo)
+        gerar_markdown(retificacoes, sobreposicoes, str(caminho_md), mes_label, len(regs_sec), len(regs_sis), nome_orgao=nome_orgao, secao_memorando=secao_memo, itens_regularizados=itens_atendidos_memo)
         print(f"[OK] Markdown salvo em: {caminho_md.relative_to(BASE_DIR)}")
 
-        gerar_txt(retificacoes, sobreposicoes, str(caminho_txt))
+        gerar_txt(retificacoes, sobreposicoes, str(caminho_txt), itens_regularizados=itens_atendidos_memo)
         print(f"[OK] Texto puro salvo em: {caminho_txt.relative_to(BASE_DIR)}")
     else:
         if caminho_md.exists():

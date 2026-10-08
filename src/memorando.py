@@ -36,19 +36,24 @@ def _parse_data(txt):
         return None
 
 
-def _extrair_datas_ocorrencia(texto, ano_ref=2026):
+def _extrair_datas_ocorrencia(texto, ano_ref=2026, mes_ref=None):
     """Extrai data_inicio, data_fim e dias a partir de múltiplos formatos de data."""
     if not texto:
         return None, None, None
 
-    # 1. Padrão: 03 e 04/10 ou 03 e 04/10/2026
+    # 1. Padrão: 03 e 04/10 ou 03 e 04/10/2026 ou 03 e 04/09
     m_e = re.search(r"\b(\d{2})\s+e\s+(\d{2})/(\d{2})(?:/(\d{4}))?\b", texto)
     if m_e:
         d1, d2, m, a = m_e.group(1), m_e.group(2), m_e.group(3), m_e.group(4)
         ano = int(a) if a else ano_ref
+        mes = int(m)
+        if mes_ref and mes != mes_ref:
+            # Caso a secretaria tenha digitado o mês de expedição por engano ao redigir
+            # o memorando (ex: digitou /10 em outubro para frequência de setembro)
+            mes = mes_ref
         try:
-            dt1 = date(ano, int(m), int(d1))
-            dt2 = date(ano, int(m), int(d2))
+            dt1 = date(ano, mes, int(d1))
+            dt2 = date(ano, mes, int(d2))
             dt_ini, dt_fim = min(dt1, dt2), max(dt1, dt2)
             return dt_ini, dt_fim, (dt_fim - dt_ini).days + 1
         except Exception:
@@ -71,8 +76,10 @@ def _extrair_datas_ocorrencia(texto, ano_ref=2026):
     if m_per_sem_ano:
         d1, m1, d2, m2 = m_per_sem_ano.groups()
         try:
-            dt1 = date(ano_ref, int(m1), int(d1))
-            dt2 = date(ano_ref, int(m2), int(d2))
+            mes1 = mes_ref if (mes_ref and int(m1) != mes_ref) else int(m1)
+            mes2 = mes_ref if (mes_ref and int(m2) != mes_ref) else int(m2)
+            dt1 = date(ano_ref, mes1, int(d1))
+            dt2 = date(ano_ref, mes2, int(d2))
             dt_ini, dt_fim = min(dt1, dt2), max(dt1, dt2)
             return dt_ini, dt_fim, (dt_fim - dt_ini).days + 1
         except Exception:
@@ -97,8 +104,9 @@ def _extrair_datas_ocorrencia(texto, ano_ref=2026):
     m_unica = re.search(r"\b(\d{2})/(\d{2})\b", texto)
     if m_unica:
         d, m = m_unica.groups()
+        mes = mes_ref if (mes_ref and int(m) != mes_ref) else int(m)
         try:
-            dt = date(ano_ref, int(m), int(d))
+            dt = date(ano_ref, mes, int(d))
             return dt, dt, 1
         except Exception:
             pass
@@ -172,7 +180,7 @@ def extrair_texto_completo_memorando(caminho_pdf):
     return "\n\n".join(paginas_texto)
 
 
-def extrair_tabelas_memorando(caminho_pdf):
+def extrair_tabelas_memorando(caminho_pdf, ano_ref=2026, mes_ref=None):
     """Extrai itens estruturados de tabelas em PDFs de memorando (suporta tabelas nativas e com bordas duplas)."""
     itens = []
     if not caminho_pdf:
@@ -222,7 +230,7 @@ def extrair_tabelas_memorando(caminho_pdf):
                             continue
 
                         per_str = str(val_per).strip()
-                        d_ini, d_fim, dias = _extrair_datas_ocorrencia(per_str)
+                        d_ini, d_fim, dias = _extrair_datas_ocorrencia(per_str, ano_ref=ano_ref, mes_ref=mes_ref)
                         if not d_ini:
                             continue
 
@@ -276,9 +284,9 @@ def extrair_tabelas_memorando(caminho_pdf):
                                     if not any(k in cand.upper() for k in ["NOME", "FUNCIONAL", "MATRICULA"]):
                                         nome = cand.upper()
                                 
-                                d_ini, d_fim, dias = _extrair_datas_ocorrencia(txt_dir)
+                                d_ini, d_fim, dias = _extrair_datas_ocorrencia(txt_dir, ano_ref=ano_ref, mes_ref=mes_ref)
                                 if not d_ini:
-                                    d_ini, d_fim, dias = _extrair_datas_ocorrencia(txt_row)
+                                    d_ini, d_fim, dias = _extrair_datas_ocorrencia(txt_row, ano_ref=ano_ref, mes_ref=mes_ref)
                                 
                                 oco = txt_dir
                                 oco_limpa = re.sub(r"\b\d{2}/\d{2}(?:/\d{4})?\b|\b\d{2}\s+e\s+\d{2}/\d{2}\b", "", oco)
@@ -307,10 +315,22 @@ def extrair_itens_memorando(texto, caminho_pdf=None):
     - Formato narrativo (parágrafos com 'Onde consta-se ... adicionar/alterar para ...')
     - Formato em tópicos (linhas com matrícula, nome, datas e evento)
     """
+    MESES_MAP = {
+        "janeiro": 1, "fevereiro": 2, "março": 3, "marco": 3, "abril": 4,
+        "maio": 5, "junho": 6, "julho": 7, "agosto": 8, "setembro": 9,
+        "outubro": 10, "novembro": 11, "dezembro": 12
+    }
     ano_ref = 2026
+    mes_ref = None
     m_ref = re.search(r"(janeiro|fevereiro|março|marco|abril|maio|junho|julho|agosto|setembro|outubro|novembro|dezembro)[/\s]+(\d{4})", texto, re.I)
     if m_ref:
+        mes_ref = MESES_MAP.get(m_ref.group(1).lower())
         ano_ref = int(m_ref.group(2))
+    elif caminho_pdf:
+        m_pasta = re.search(r"(\d{4})-(\d{2})", str(caminho_pdf))
+        if m_pasta:
+            ano_ref = int(m_pasta.group(1))
+            mes_ref = int(m_pasta.group(2))
 
     # 1. Identificação do cabeçalho do memorando (número do memo e processo)
     memo_num = None
@@ -327,7 +347,7 @@ def extrair_itens_memorando(texto, caminho_pdf=None):
 
     # Se o documento possuir tabela estruturada com dados, utiliza diretamente
     if caminho_pdf:
-        itens_tab = extrair_tabelas_memorando(caminho_pdf)
+        itens_tab = extrair_tabelas_memorando(caminho_pdf, ano_ref=ano_ref, mes_ref=mes_ref)
         if itens_tab:
             return {
                 "numero_memorando": memo_num,
@@ -405,7 +425,7 @@ def extrair_itens_memorando(texto, caminho_pdf=None):
         mat_formatada = f"{mat_norm[:2]}.{mat_norm[2:5]}-{mat_norm[5:]}" if len(mat_norm) == 6 else mat_bruta
 
         # Procura datas da ocorrência
-        d_ini, d_fim, dias = _extrair_datas_ocorrencia(bloco_limpo, ano_ref)
+        d_ini, d_fim, dias = _extrair_datas_ocorrencia(bloco_limpo, ano_ref, mes_ref=mes_ref)
         if not d_ini:
             continue
 
@@ -491,87 +511,80 @@ def conferir_memorando_com_solicitacoes(dados_memorando, retificacoes_solicitada
         
         if not solics:
             avulsas.append(item)
-            continue
-
-        # Procura correspondência de período
+            continue        # Procura correspondência de período / servidor
         encontrou = False
         for idx, sol in enumerate(solics):
             sol_id = (m_norm, sol["data_inicio"], sol["data_fim"])
-            
+            if sol_id in solicitacoes_atendidas_ids:
+                continue
+
             # Verifica sobreposição de datas
             datas_coincidem = False
-            if item["data_inicio"] and item["data_fim"]:
+            if item.get("data_inicio") and item.get("data_fim") and sol.get("data_inicio") and sol.get("data_fim"):
                 if (item["data_inicio"] <= sol["data_fim"]) and (item["data_fim"] >= sol["data_inicio"]):
                     datas_coincidem = True
+                # Tolerância: mesmo dia inicial ou único apontamento do servidor no mês
+                elif (item["data_inicio"].day == sol["data_inicio"].day) or (len(solics) == 1):
+                    datas_coincidem = True
 
-            if datas_coincidem:
-                # Compara ocorrência informada com o tipo do sistema
-                oc_memo_norm = _normalizar_texto(item["ocorrencia"])
-                tipo_sis_norm = _normalizar_texto(sol.get("tipo_sistema", ""))
-                
-                # Tolerância de equivalência de tipos
-                compativel = (oc_memo_norm == tipo_sis_norm) or \
-                             ("saude" in oc_memo_norm and "saude" in tipo_sis_norm) or \
-                             ("ferias" in oc_memo_norm and "ferias" in tipo_sis_norm) or \
-                             ("falta" in oc_memo_norm and "falta" in tipo_sis_norm) or \
-                             ("abono" in oc_memo_norm and "abono" in tipo_sis_norm)
+            # Compara ocorrência informada com o tipo do sistema / secretaria
+            oc_memo_norm = _normalizar_texto(item["ocorrencia"])
+            tipo_sis_norm = _normalizar_texto(sol.get("tipo_sistema", ""))
+            tipo_sec_norm = _normalizar_texto(sol.get("tipo_secretaria", ""))
 
-                datas_exatas = (item["data_inicio"] == sol["data_inicio"] and item["data_fim"] == sol["data_fim"])
-                abrange_periodo = (item["data_inicio"] <= sol["data_inicio"] and item["data_fim"] >= sol["data_fim"])
+            # Tolerância de equivalência de tipos
+            compativel = (
+                (oc_memo_norm == tipo_sis_norm) or
+                ("saude" in oc_memo_norm and "saude" in tipo_sis_norm) or
+                ("medico" in oc_memo_norm and "saude" in tipo_sis_norm) or
+                ("ferias" in oc_memo_norm and "ferias" in tipo_sis_norm) or
+                ("falta" in oc_memo_norm and "falta" in tipo_sis_norm) or
+                ("abono" in oc_memo_norm and "abono" in tipo_sis_norm) or
+                ("nojo" in oc_memo_norm and "nojo" in tipo_sis_norm) or
+                (oc_memo_norm in tipo_sis_norm or tipo_sis_norm in oc_memo_norm) or
+                (oc_memo_norm == tipo_sec_norm)
+            )
 
-                if compativel and (datas_exatas or abrange_periodo):
-                    status_desc = "Atendido conforme solicitado" if datas_exatas else f"Atendido (Atestado do memo abrange o período: {item['data_inicio'].strftime('%d/%m/%Y')} a {item['data_fim'].strftime('%d/%m/%Y')})"
-                    atendidas.append({
-                        "matricula": sol["matricula"],
-                        "nome": sol["nome"] or item["nome"],
-                        "data_inicio": sol["data_inicio"],
-                        "data_fim": sol["data_fim"],
-                        "dias": sol["dias"],
-                        "tipo_retificado": item["ocorrencia"],
-                        "status": status_desc,
-                    })
-                    solicitacoes_atendidas_ids.add(sol_id)
-                    encontrou = True
-                    break
+            datas_exatas = (item["data_inicio"] == sol["data_inicio"] and item["data_fim"] == sol["data_fim"])
+            abrange_periodo = (item.get("data_inicio") and item.get("data_fim") and item["data_inicio"] <= sol["data_inicio"] and item["data_fim"] >= sol["data_fim"])
+
+            # O memorando de retificação se sobrepõe ao enviado inicialmente e justifica a ocorrência
+            if compativel or datas_coincidem or len(solics) == 1:
+                dt_memo_str = (
+                    f"{item['data_inicio'].strftime('%d/%m/%Y')} a {item['data_fim'].strftime('%d/%m/%Y')}"
+                    if item.get("data_inicio") and item["data_inicio"] != item["data_fim"]
+                    else (item["data_inicio"].strftime("%d/%m/%Y") if item.get("data_inicio") else "")
+                )
+
+                if datas_exatas and compativel:
+                    status_desc = "Atendido conforme solicitado"
+                elif abrange_periodo and compativel:
+                    status_desc = f"Regularizado por memorando de retificação (Período no memo: {dt_memo_str})"
+                elif datas_coincidem and compativel:
+                    status_desc = f"Regularizado por memorando de retificação (Período retificado no memo: {dt_memo_str})"
                 else:
-                    motivos = []
-                    if not (datas_exatas or abrange_periodo):
-                        motivos.append(f"Datas informadas no memo ({item['data_inicio'].strftime('%d/%m/%Y')} a {item['data_fim'].strftime('%d/%m/%Y')}) divergem da solicitação ({sol['data_inicio'].strftime('%d/%m/%Y')} a {sol['data_fim'].strftime('%d/%m/%Y')})")
+                    detalhes = []
+                    if dt_memo_str:
+                        detalhes.append(f"Período no memo: {dt_memo_str}")
                     if not compativel:
-                        motivos.append(f"Ocorrência informada no memo ({item['ocorrencia']}) difere do sistema ({sol.get('tipo_sistema')})")
+                        detalhes.append(f"Ocorrência retificada: {item['ocorrencia']}")
+                    det_txt = f" ({'; '.join(detalhes)})" if detalhes else ""
+                    status_desc = f"Regularizado por memorando de retificação{det_txt}"
 
-                    divergencias_memo.append({
-                        "matricula": sol["matricula"],
-                        "nome": sol["nome"] or item["nome"],
-                        "solicitado": f"{sol['data_inicio'].strftime('%d/%m/%Y')} a {sol['data_fim'].strftime('%d/%m/%Y')} ({sol['tipo_secretaria']} --> {sol['tipo_sistema']})",
-                        "informado_memo": f"{item['data_inicio'].strftime('%d/%m/%Y')} a {item['data_fim'].strftime('%d/%m/%Y')} ({item['ocorrencia']})",
-                        "motivo": "; ".join(motivos),
-                    })
-                    solicitacoes_atendidas_ids.add(sol_id)
-                    encontrou = True
-                    break
-
-        if not encontrou and solics:
-            # Servidor no memo com datas não sobrepostas: registra divergência de período
-            sol_cand = None
-            for sol in solics:
-                s_id = (m_norm, sol["data_inicio"], sol["data_fim"])
-                if s_id not in solicitacoes_atendidas_ids:
-                    sol_cand = sol
-                    break
-            if sol_cand:
-                s_id = (m_norm, sol_cand["data_inicio"], sol_cand["data_fim"])
-                dt_memo = f"{item['data_inicio'].strftime('%d/%m/%Y')} a {item['data_fim'].strftime('%d/%m/%Y')}" if item.get('data_inicio') else "Data não identificada"
-                dt_sol = f"{sol_cand['data_inicio'].strftime('%d/%m/%Y')} a {sol_cand['data_fim'].strftime('%d/%m/%Y')}"
-                divergencias_memo.append({
-                    "matricula": sol_cand["matricula"],
-                    "nome": sol_cand["nome"] or item["nome"],
-                    "solicitado": f"{dt_sol} ({sol_cand['tipo_secretaria']} --> {sol_cand['tipo_sistema']})",
-                    "informado_memo": f"{dt_memo} ({item['ocorrencia']})",
-                    "motivo": f"Datas informadas no memo ({dt_memo}) divergem da solicitação ({dt_sol})",
+                atendidas.append({
+                    "matricula": sol["matricula"],
+                    "nome": sol["nome"] or item["nome"],
+                    "data_inicio": sol["data_inicio"],
+                    "data_fim": sol["data_fim"],
+                    "dias": sol["dias"],
+                    "tipo_retificado": item["ocorrencia"],
+                    "data_memo_inicio": item.get("data_inicio"),
+                    "data_memo_fim": item.get("data_fim"),
+                    "status": status_desc,
                 })
-                solicitacoes_atendidas_ids.add(s_id)
+                solicitacoes_atendidas_ids.add(sol_id)
                 encontrou = True
+                break
 
         if not encontrou:
             avulsas.append(item)
