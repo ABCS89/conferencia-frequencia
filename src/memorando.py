@@ -36,6 +36,76 @@ def _parse_data(txt):
         return None
 
 
+def _extrair_datas_ocorrencia(texto, ano_ref=2026):
+    """Extrai data_inicio, data_fim e dias a partir de múltiplos formatos de data."""
+    if not texto:
+        return None, None, None
+
+    # 1. Padrão: 03 e 04/10 ou 03 e 04/10/2026
+    m_e = re.search(r"\b(\d{2})\s+e\s+(\d{2})/(\d{2})(?:/(\d{4}))?\b", texto)
+    if m_e:
+        d1, d2, m, a = m_e.group(1), m_e.group(2), m_e.group(3), m_e.group(4)
+        ano = int(a) if a else ano_ref
+        try:
+            dt1 = date(ano, int(m), int(d1))
+            dt2 = date(ano, int(m), int(d2))
+            dt_ini, dt_fim = min(dt1, dt2), max(dt1, dt2)
+            return dt_ini, dt_fim, (dt_fim - dt_ini).days + 1
+        except Exception:
+            pass
+
+    # 2. Padrão período com ano completo: 01/09/2026 a 05/09/2026 ou 01/09/2026 ao 05/09/2026
+    m_per = re.search(r"\b(\d{2})/(\d{2})/(\d{4})\s*(?:a|ao|até|-)\s*(\d{2})/(\d{2})/(\d{4})\b", texto, re.I)
+    if m_per:
+        d1, m1, a1, d2, m2, a2 = m_per.groups()
+        try:
+            dt1 = date(int(a1), int(m1), int(d1))
+            dt2 = date(int(a2), int(m2), int(d2))
+            dt_ini, dt_fim = min(dt1, dt2), max(dt1, dt2)
+            return dt_ini, dt_fim, (dt_fim - dt_ini).days + 1
+        except Exception:
+            pass
+
+    # 3. Padrão período sem ano: 01/09 a 05/09
+    m_per_sem_ano = re.search(r"\b(\d{2})/(\d{2})\s*(?:a|ao|até|-)\s*(\d{2})/(\d{2})\b", texto, re.I)
+    if m_per_sem_ano:
+        d1, m1, d2, m2 = m_per_sem_ano.groups()
+        try:
+            dt1 = date(ano_ref, int(m1), int(d1))
+            dt2 = date(ano_ref, int(m2), int(d2))
+            dt_ini, dt_fim = min(dt1, dt2), max(dt1, dt2)
+            return dt_ini, dt_fim, (dt_fim - dt_ini).days + 1
+        except Exception:
+            pass
+
+    # 4. Datas completas DD/MM/AAAA
+    datas_completas = re.findall(r"\b(\d{2})/(\d{2})/(\d{4})\b", texto)
+    if datas_completas:
+        d_objs = []
+        for d, m, a in datas_completas:
+            try:
+                d_objs.append(date(int(a), int(m), int(d)))
+            except Exception:
+                pass
+        if len(d_objs) == 1:
+            return d_objs[0], d_objs[0], 1
+        elif len(d_objs) >= 2:
+            dt_ini, dt_fim = min(d_objs[0], d_objs[1]), max(d_objs[0], d_objs[1])
+            return dt_ini, dt_fim, (dt_fim - dt_ini).days + 1
+
+    # 5. Data única sem ano DD/MM
+    m_unica = re.search(r"\b(\d{2})/(\d{2})\b", texto)
+    if m_unica:
+        d, m = m_unica.groups()
+        try:
+            dt = date(ano_ref, int(m), int(d))
+            return dt, dt, 1
+        except Exception:
+            pass
+
+    return None, None, None
+
+
 def localizar_memorando(codigo_sec, contexto_dir):
     """Localiza arquivo de memorando de retificação correspondente ao código da secretaria."""
     contexto_dir = Path(contexto_dir)
@@ -103,7 +173,7 @@ def extrair_texto_completo_memorando(caminho_pdf):
 
 
 def extrair_tabelas_memorando(caminho_pdf):
-    """Extrai itens estruturados de tabelas em PDFs de memorando (suporta células mescladas verticalmente)."""
+    """Extrai itens estruturados de tabelas em PDFs de memorando (suporta tabelas nativas e com bordas duplas)."""
     itens = []
     if not caminho_pdf:
         return itens
@@ -111,6 +181,7 @@ def extrair_tabelas_memorando(caminho_pdf):
         with pdfplumber.open(str(caminho_pdf)) as pdf:
             for page in pdf.pages:
                 tables = page.extract_tables()
+                tabela_nativa_sucesso = False
                 for table in tables:
                     if not table or len(table) < 2:
                         continue
@@ -151,16 +222,13 @@ def extrair_tabelas_memorando(caminho_pdf):
                             continue
 
                         per_str = str(val_per).strip()
-                        datas = re.findall(r"(\d{2}/\d{2}/\d{4})", per_str)
-                        if not datas:
+                        d_ini, d_fim, dias = _extrair_datas_ocorrencia(per_str)
+                        if not d_ini:
                             continue
-                        d_ini = _parse_data(datas[0])
-                        d_fim = _parse_data(datas[1]) if len(datas) > 1 else d_ini
 
                         if ult_mat:
                             m_norm = normalizar_matricula(ult_mat)
                             mat_fmt = f"{m_norm[:2]}.{m_norm[2:5]}-{m_norm[5:]}" if len(m_norm) == 6 else ult_mat
-                            dias = (d_fim - d_ini).days + 1 if d_ini and d_fim else 1
                             itens.append({
                                 "matricula": mat_fmt,
                                 "matricula_norm": m_norm,
@@ -171,6 +239,61 @@ def extrair_tabelas_memorando(caminho_pdf):
                                 "dias": dias,
                                 "texto_original": f"{ult_mat} - {ult_nome} - {ult_oco} - {per_str}",
                             })
+                            tabela_nativa_sucesso = True
+
+                # Fallback: tabelas desenhadas com linhas e sem cabeçalhos de coluna rotulados (ex: memo 108)
+                if not tabela_nativa_sucesso and len(page.lines) >= 4:
+                    h_lines = sorted(list(set(round(l['top'], 0) for l in page.lines if abs(l['top'] - l['bottom']) < 2 and l['width'] > 100)))
+                    merged_h = []
+                    for y in h_lines:
+                        if not merged_h or (y - merged_h[-1]) > 5:
+                            merged_h.append(y)
+                        else:
+                            merged_h[-1] = y
+                    
+                    if len(merged_h) >= 2:
+                        for i in range(len(merged_h) - 1):
+                            y0, y1 = merged_h[i], merged_h[i+1]
+                            words = [w for w in page.extract_words() if y0 <= w['top'] <= y1 and w['x0'] < 550]
+                            if not words:
+                                continue
+                            txt_row = " ".join(w['text'] for w in sorted(words, key=lambda x: (x['top'], x['x0'])))
+                            m_mat = re.search(r"\b(\d{2}[\.,]\d{3}[-_ ]\d|\d{3}[\.,]\d{3}|\d{5,6})\b", txt_row)
+                            if m_mat:
+                                mat_bruta = m_mat.group(1)
+                                mat_norm = normalizar_matricula(mat_bruta)
+                                mat_fmt = f"{mat_norm[:2]}.{mat_norm[2:5]}-{mat_norm[5:]}" if len(mat_norm) == 6 else mat_bruta
+                                
+                                col_esq = [w['text'] for w in sorted([w for w in words if w['x0'] < 200], key=lambda x: (x['top'], x['x0']))]
+                                col_dir = [w['text'] for w in sorted([w for w in words if w['x0'] >= 200], key=lambda x: (x['top'], x['x0']))]
+                                txt_esq = " ".join(col_esq)
+                                txt_dir = " ".join(col_dir)
+                                
+                                nome = None
+                                m_nome = re.search(r"^([A-ZÁÉÍÓÚÀÈÌÒÙÃÕÂÊÎÔÛÇ\s]{4,45}?)(?:\s+N[ºo\.]*|\s+Matr[íi]cula|\s*[-–]|$)", txt_esq, re.I)
+                                if m_nome:
+                                    cand = m_nome.group(1).strip()
+                                    if not any(k in cand.upper() for k in ["NOME", "FUNCIONAL", "MATRICULA"]):
+                                        nome = cand.upper()
+                                
+                                d_ini, d_fim, dias = _extrair_datas_ocorrencia(txt_dir)
+                                if not d_ini:
+                                    d_ini, d_fim, dias = _extrair_datas_ocorrencia(txt_row)
+                                
+                                oco = txt_dir
+                                oco_limpa = re.sub(r"\b\d{2}/\d{2}(?:/\d{4})?\b|\b\d{2}\s+e\s+\d{2}/\d{2}\b", "", oco)
+                                oco_limpa = re.sub(r"^[-–\s]+|[-–\s]+$", "", oco_limpa).strip()
+                                
+                                itens.append({
+                                    "matricula": mat_fmt,
+                                    "matricula_norm": mat_norm,
+                                    "nome": nome,
+                                    "data_inicio": d_ini,
+                                    "data_fim": d_fim,
+                                    "dias": dias,
+                                    "ocorrencia": oco_limpa or "Não informada",
+                                    "texto_original": txt_row
+                                })
     except Exception:
         pass
     return itens
@@ -184,34 +307,60 @@ def extrair_itens_memorando(texto, caminho_pdf=None):
     - Formato narrativo (parágrafos com 'Onde consta-se ... adicionar/alterar para ...')
     - Formato em tópicos (linhas com matrícula, nome, datas e evento)
     """
-    itens = []
-
-    # Extrai primeiro por tabelas se o caminho do PDF estiver disponível
-    if caminho_pdf:
-        itens_tab = extrair_tabelas_memorando(caminho_pdf)
-        if itens_tab:
-            itens.extend(itens_tab)
-
-    chaves_existentes = {(it["matricula_norm"], it["data_inicio"], it["data_fim"]) for it in itens}
+    ano_ref = 2026
+    m_ref = re.search(r"(janeiro|fevereiro|março|marco|abril|maio|junho|julho|agosto|setembro|outubro|novembro|dezembro)[/\s]+(\d{4})", texto, re.I)
+    if m_ref:
+        ano_ref = int(m_ref.group(2))
 
     # 1. Identificação do cabeçalho do memorando (número do memo e processo)
     memo_num = None
     m_num = re.search(r"Memorando\s+([A-Za-z0-9_/\.-]+\s+n[ºo\.]*\s*\d+/\d+)", texto, re.IGNORECASE)
     if not m_num:
-        m_num = re.search(r"(?:Memo|Memorando)\s*[:\s]*([A-Za-z0-9_/\.-]+\d+/\d+|\d+/\d+|\d+\.\d+)", texto, re.IGNORECASE)
+        m_num = re.search(r"(?:Memo|Memorando)[/:\s]+([A-Za-z0-9_/\.-]+(?:\s+n[ºo\.]*\s*\d+/\d+)?|\d+/\d+|\d+\.\d+)", texto, re.IGNORECASE)
     if m_num:
         memo_num = m_num.group(1).strip()
 
     proc_num = None
-    m_proc = re.search(r"Processo\s+(?:n[ºo\.]*\s*)?([A-Za-z0-9_/\.-]+)", texto, re.IGNORECASE)
+    m_proc = re.search(r"(?:processo(?:/documento)?|proc\.?)\s*(?:n[ºo\.]*\s*)?([A-Za-z0-9_/\.-]+(?:\s+\d+/\d+)?)", texto, re.IGNORECASE)
     if m_proc:
         proc_num = m_proc.group(1).strip()
 
-    # Descarta rodapés e páginas de assinatura digital do SemPapel/SolarBPM
-    texto_util = re.split(r"Assinaturas\s+do\s+documento|Peça\s+do\s+processo/documento", texto, flags=re.IGNORECASE)[0]
+    # Se o documento possuir tabela estruturada com dados, utiliza diretamente
+    if caminho_pdf:
+        itens_tab = extrair_tabelas_memorando(caminho_pdf)
+        if itens_tab:
+            return {
+                "numero_memorando": memo_num,
+                "processo": proc_num,
+                "itens": itens_tab,
+            }
 
-    # Divide o texto em parágrafos e linhas
-    blocos = re.split(r"\n\s*\n|(?=Onde\s+consta)|(?=[A-Z\s]{4,}\s*[-–]\s*\d{2}[\.,]\d{3})", texto_util)
+    itens = []
+    chaves_existentes = set()
+
+    # Descarta rodapés e páginas de assinatura digital do SemPapel/SolarBPM
+    texto_util = re.split(r"Assinaturas\s+do\s+documento|Pe[ç\ufffd\?a-zA-Z]?a\s+do\s+processo/documento", texto, flags=re.IGNORECASE)[0]
+
+    # Limpa linhas de expediente (data de expedição do memorando não deve virar data de ocorrência)
+    linhas = texto_util.split("\n")
+    linhas_uteis = []
+    for l in linhas:
+        l_s = l.strip()
+        if not l_s:
+            continue
+        # Ignora linhas de expedição de memorando (ex: "Data: 06/10/2026")
+        if re.match(r"^Data:\s*\d{2}/\d{2}/\d{4}", l_s, re.I):
+            continue
+        if re.match(r"^Piracicaba,\s*\d{1,2}\s+de\s+[a-zç]+\s+de\s+\d{4}", l_s, re.I):
+            continue
+        # Ignora marcas verticais e rodapés do SemPapel
+        if re.search(r"odanissa|otnemucoD|sotnemucoD|ogid[ó\xef\ufffd]?c|ossecorp|\.g[á\xef\ufffd]?P|epapmes", l_s, re.I):
+            continue
+        linhas_uteis.append(l_s)
+    texto_filtrado = "\n".join(linhas_uteis)
+
+    # Divide o texto em blocos por servidor (quebra por parágrafo, marcadores ou nova matrícula)
+    blocos = re.split(r"\n\s*\n|(?=[\u2022\uf0b7]\s*)|(?=Onde\s+consta)|(?=[A-Z\s]{4,}\s*[-–]\s*\d{2}[\.,]\d{3})", texto_filtrado)
     
     # Dicionário de ocorrências conhecidas para busca flexível
     OCORRENCIAS_PADRAO = [
@@ -227,6 +376,7 @@ def extrair_itens_memorando(texto, caminho_pdf=None):
         "faltas efetivos",
         "minutos perdidos",
         "acidente de trabalho",
+        "doenca em pessoa da familia",
         "licenca maternidade",
         "gestante",
         "doacao de sangue",
@@ -242,9 +392,9 @@ def extrair_itens_memorando(texto, caminho_pdf=None):
         if not bloco_limpo:
             continue
 
-        # Procura matrícula
-        # Padrões: 913.286, 91.328-6, 18.290-7, 182907
-        m_mat = re.search(r"\b(\d{2}[\.,]\d{3}[-_ ]\d|\d{3}[\.,]\d{3}|\d{5,6})\b", bloco_limpo)
+        # Procura matrícula (desconsidera números de processo que antecedem)
+        bloco_sem_proc = re.sub(r"processo\s+(?:202\d/)?\d+", "", bloco_limpo, flags=re.I)
+        m_mat = re.search(r"\b(\d{2}[\.,]\d{3}[-_ ]\d|\d{3}[\.,]\d{3}|\d{5,6})\b", bloco_sem_proc)
         if not m_mat:
             continue
 
@@ -254,21 +404,10 @@ def extrair_itens_memorando(texto, caminho_pdf=None):
         # Formata para padrão XX.XXX-X se tiver 6 dígitos
         mat_formatada = f"{mat_norm[:2]}.{mat_norm[2:5]}-{mat_norm[5:]}" if len(mat_norm) == 6 else mat_bruta
 
-        # Procura datas (ex.: 07/08/2026 ao 21/08/2026, de 07/08/2026 a 21/08/2026, 07/08/2026)
-        datas = re.findall(r"(\d{2}/\d{2}/\d{4})", bloco_limpo)
-        if not datas:
+        # Procura datas da ocorrência
+        d_ini, d_fim, dias = _extrair_datas_ocorrencia(bloco_limpo, ano_ref)
+        if not d_ini:
             continue
-
-        d_ini = _parse_data(datas[0])
-        d_fim = _parse_data(datas[1]) if len(datas) > 1 else d_ini
-
-        # Quantidade de dias
-        dias = None
-        m_dias = re.search(r"\b(\d+)\s*dias?\b", bloco_limpo, re.IGNORECASE)
-        if m_dias:
-            dias = int(m_dias.group(1))
-        elif d_ini and d_fim:
-            dias = (d_fim - d_ini).days + 1
 
         # Procura nome do servidor
         nome = None
@@ -289,9 +428,12 @@ def extrair_itens_memorando(texto, caminho_pdf=None):
 
         # Ocorrência nova informada (De -> Para)
         nova_ocorrencia = None
-        m_acao = re.search(r"(?:adicionar|alterar para|retificar para|lan[çc]ar|substituir por|trocar por)\s+([A-ZÁÉÍÓÚÀÈÌÒÙÃÕÂÊÎÔÛÇ\s/]+?)(?:\s+de\s+\d+|\s+do\s+dia|\s+no\s+per[íi]odo|\s+referente|\s*;|\s*\.)", bloco_limpo, re.IGNORECASE)
+        m_acao = re.search(r"(?:adicionar|alterar para|retificar para|lan[çc]ar|substituir por|trocar por|considerando:?\s*[-–]?)\s*([A-ZÁÉÍÓÚÀÈÌÒÙÃÕÂÊÎÔÛÇ\s/]+?)(?:\s+de\s+\d+|\s+do\s+dia|\s+no\s+per[íi]odo|\s+referente|\s*;|\s*\.)", bloco_limpo, re.IGNORECASE)
         if m_acao:
-            nova_ocorrencia = " ".join(m_acao.group(1).split()).strip()
+            cand_oco = " ".join(m_acao.group(1).split()).strip()
+            cand_oco = re.sub(r"\b\d{2}/\d{2}(?:/\d{4})?\b", "", cand_oco).strip()
+            if cand_oco:
+                nova_ocorrencia = cand_oco
         else:
             # Fallback: procura se alguma ocorrência padrão foi mencionada
             norm_b = _normalizar_texto(bloco_limpo)
@@ -408,6 +550,28 @@ def conferir_memorando_com_solicitacoes(dados_memorando, retificacoes_solicitada
                     solicitacoes_atendidas_ids.add(sol_id)
                     encontrou = True
                     break
+
+        if not encontrou and solics:
+            # Servidor no memo com datas não sobrepostas: registra divergência de período
+            sol_cand = None
+            for sol in solics:
+                s_id = (m_norm, sol["data_inicio"], sol["data_fim"])
+                if s_id not in solicitacoes_atendidas_ids:
+                    sol_cand = sol
+                    break
+            if sol_cand:
+                s_id = (m_norm, sol_cand["data_inicio"], sol_cand["data_fim"])
+                dt_memo = f"{item['data_inicio'].strftime('%d/%m/%Y')} a {item['data_fim'].strftime('%d/%m/%Y')}" if item.get('data_inicio') else "Data não identificada"
+                dt_sol = f"{sol_cand['data_inicio'].strftime('%d/%m/%Y')} a {sol_cand['data_fim'].strftime('%d/%m/%Y')}"
+                divergencias_memo.append({
+                    "matricula": sol_cand["matricula"],
+                    "nome": sol_cand["nome"] or item["nome"],
+                    "solicitado": f"{dt_sol} ({sol_cand['tipo_secretaria']} --> {sol_cand['tipo_sistema']})",
+                    "informado_memo": f"{dt_memo} ({item['ocorrencia']})",
+                    "motivo": f"Datas informadas no memo ({dt_memo}) divergem da solicitação ({dt_sol})",
+                })
+                solicitacoes_atendidas_ids.add(s_id)
+                encontrou = True
 
         if not encontrou:
             avulsas.append(item)
