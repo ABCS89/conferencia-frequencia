@@ -236,13 +236,22 @@ def apurar_dados_monitoramento(regs_sec, regs_sis, regularizados=None):
     }
 
 
-def gerar_markdown_monitoramento(dados, caminho_md, mes_label, nome_orgao=""):
+def gerar_markdown_monitoramento(dados, caminho_md, mes_label, nome_orgao="", avisos_mes=None):
     linhas = []
     titulo = f"# Relatório de Monitoramento — Atrasos e Faltas Acumuladas"
     subtitulo = f"### Órgão / Secretaria: {nome_orgao} ({mes_label})" if nome_orgao else f"### Referência: {mes_label}"
     linhas.append(titulo)
     linhas.append(subtitulo)
     linhas.append("")
+    if avisos_mes:
+        linhas.append("> [!CAUTION]")
+        linhas.append("> ### ⚠️ ALERTA: ARQUIVO COM COMPETÊNCIA DIVERGENTE OU PASTA INCORRETA")
+        linhas.append("> Foram identificadas divergências de mês de competência nos documentos analisados:")
+        for av in avisos_mes:
+            linhas.append(f"> - {av}")
+        linhas.append(">")
+        linhas.append("> *Atenção: Os totais de minutos e faltas acumuladas podem estar comprometidos pela divergência de competência.*")
+        linhas.append("")
     linhas.append("> [!NOTE]")
     linhas.append("> Este relatório consolida os atrasos acumulados (minutos perdidos) e faltas apuradas no mês para fins de monitoramento, auditoria interna e posterior cobrança de justificativas.")
     linhas.append("")
@@ -299,7 +308,7 @@ def gerar_markdown_monitoramento(dados, caminho_md, mes_label, nome_orgao=""):
         f.write("\n".join(linhas))
 
 
-def gerar_excel_monitoramento(dados, caminho_xlsx, mes_label, nome_orgao=""):
+def gerar_excel_monitoramento(dados, caminho_xlsx, mes_label, nome_orgao="", avisos_mes=None):
     wb = Workbook()
 
     # 1. Aba Resumo
@@ -308,12 +317,23 @@ def gerar_excel_monitoramento(dados, caminho_xlsx, mes_label, nome_orgao=""):
     ws_res.append([f"Painel de Monitoramento — {nome_orgao} ({mes_label})"])
     ws_res["A1"].font = Font(bold=True, size=14)
     ws_res.append([])
+    if avisos_mes:
+        for av in avisos_mes:
+            ws_res.append(["⚠️ ALERTA DE COMPETÊNCIA/PASTA", av])
+            cel_a = ws_res.cell(row=ws_res.max_row, column=1)
+            cel_b = ws_res.cell(row=ws_res.max_row, column=2)
+            cel_a.font = Font(bold=True, color="9C0006")
+            cel_a.fill = PatternFill("solid", fgColor="FFC7CE")
+            cel_b.font = Font(bold=True, color="9C0006")
+            cel_b.fill = PatternFill("solid", fgColor="FFC7CE")
+        ws_res.append([])
     res = dados["resumo"]
     ws_res.append(["Indicador", "Valor"])
-    ws_res["A3"].font = Font(bold=True, color="FFFFFF")
-    ws_res["A3"].fill = PatternFill("solid", fgColor=COR_CABECALHO)
-    ws_res["B3"].font = Font(bold=True, color="FFFFFF")
-    ws_res["B3"].fill = PatternFill("solid", fgColor=COR_CABECALHO)
+    cab_row = ws_res.max_row
+    ws_res[f"A{cab_row}"].font = Font(bold=True, color="FFFFFF")
+    ws_res[f"A{cab_row}"].fill = PatternFill("solid", fgColor=COR_CABECALHO)
+    ws_res[f"B{cab_row}"].font = Font(bold=True, color="FFFFFF")
+    ws_res[f"B{cab_row}"].fill = PatternFill("solid", fgColor=COR_CABECALHO)
 
     ws_res.append(["Servidores com atrasos (minutos perdidos)", res["total_servidores_atrasos"]])
     ws_res.append(["Total de minutos perdidos acumulados", f"{res['total_minutos']} min ({res['total_tempo_formatado']})"])

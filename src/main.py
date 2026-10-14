@@ -20,12 +20,18 @@ import re
 from pathlib import Path
 from datetime import datetime
 
+# Garante saída compatível com consoles Windows (cp1252 / UTF-8)
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 # Garante que imports locais funcionem
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from extract_secretaria import extrair as extrair_secretaria, extrair_cabecalho
-from extract_sistema import extrair as extrair_sistema
-from compare import comparar_por_dia
+from extract_sistema import extrair as extrair_sistema, extrair_cabecalho_sistema
+from compare import comparar_por_dia, mes_referencia, mes_referencia_registros
 from desligados import localizar_e_carregar_desligados, normalizar_matricula
 from monitoring import (
     apurar_dados_monitoramento,
@@ -60,6 +66,64 @@ COR_REGULARIZADO = "E2EFDA"              # verde suave: regularizado por memoran
 
 MESES_PT = ["", "janeiro", "fevereiro", "março", "abril", "maio", "junho",
             "julho", "agosto", "setembro", "outubro", "novembro", "dezembro"]
+
+
+def formatar_mes_ano(ano_mes):
+    """Formata tupla (ano, mes) como 'MM/AAAA (Mês/AAAA)'."""
+    if not ano_mes or len(ano_mes) != 2:
+        return "não identificado"
+    ano, mes = ano_mes
+    if 1 <= mes <= 12:
+        nome_mes = MESES_PT[mes].capitalize()
+        return f"{str(mes).zfill(2)}/{ano} ({nome_mes}/{ano})"
+    return f"{str(mes).zfill(2)}/{ano}"
+
+
+def validar_competencia_documentos(ano_mes_esperado, mes_cabecalho_sec, mes_moda_sec,
+                                  mes_cabecalho_sis, mes_moda_sis,
+                                  nome_sec_pdf="", nome_sis_pdf=""):
+    """Verifica se os arquivos da Secretaria e do Sistema coincidem entre si
+    e com o mês esperado do lote (pasta). Retorna lista de avisos (vazia se estiver tudo correto).
+    """
+    avisos = []
+    mes_sec = mes_cabecalho_sec or mes_moda_sec
+    mes_sis = mes_cabecalho_sis or mes_moda_sis
+
+    # 1. Secretaria vs Pasta do lote
+    if ano_mes_esperado and mes_sec and mes_sec != ano_mes_esperado:
+        avisos.append(
+            f"Arquivo da Secretaria ('{nome_sec_pdf}') aponta para {formatar_mes_ano(mes_sec)}, "
+            f"divergente da pasta do lote ({formatar_mes_ano(ano_mes_esperado)})."
+        )
+
+    # 2. Sistema vs Pasta do lote
+    if ano_mes_esperado and mes_sis and mes_sis != ano_mes_esperado:
+        avisos.append(
+            f"Arquivo do Sistema ('{nome_sis_pdf}') aponta para {formatar_mes_ano(mes_sis)}, "
+            f"divergente da pasta do lote ({formatar_mes_ano(ano_mes_esperado)})."
+        )
+
+    # 3. Secretaria vs Sistema entre si
+    if mes_sec and mes_sis and mes_sec != mes_sis:
+        avisos.append(
+            f"Divergência entre documentos: Secretaria refere-se a {formatar_mes_ano(mes_sec)} "
+            f"enquanto Sistema refere-se a {formatar_mes_ano(mes_sis)}."
+        )
+
+    # 4. Inconsistência interna (cabeçalho vs lançamentos)
+    if mes_cabecalho_sec and mes_moda_sec and mes_cabecalho_sec != mes_moda_sec:
+        avisos.append(
+            f"Arquivo da Secretaria ('{nome_sec_pdf}') traz cabeçalho {formatar_mes_ano(mes_cabecalho_sec)}, "
+            f"mas a maioria dos registros lançados é de {formatar_mes_ano(mes_moda_sec)}."
+        )
+
+    if mes_cabecalho_sis and mes_moda_sis and mes_cabecalho_sis != mes_moda_sis:
+        avisos.append(
+            f"Arquivo do Sistema ('{nome_sis_pdf}') traz cabeçalho {formatar_mes_ano(mes_cabecalho_sis)}, "
+            f"mas a maioria dos registros lançados é de {formatar_mes_ano(mes_moda_sis)}."
+        )
+
+    return avisos
 
 
 def sanitizar_nome_arquivo(texto):
@@ -118,7 +182,7 @@ def _eh_divergencia_secretaria(r):
     return True
 
 
-def gerar_excel(retificacoes, sobreposicoes, caminho_saida, total_sec, total_sis, mes_label, nome_orgao="", itens_regularizados=None):
+def gerar_excel(retificacoes, sobreposicoes, caminho_saida, total_sec, total_sis, mes_label, nome_orgao="", itens_regularizados=None, avisos_mes=None):
     wb = Workbook()
 
     ws = wb.active
@@ -209,6 +273,16 @@ def gerar_excel(retificacoes, sobreposicoes, caminho_saida, total_sec, total_sis
     ws2.append(["Gerado em", datetime.now().strftime("%d/%m/%Y %H:%M")])
     ws2.append(["Órgão / Secretaria", nome_orgao or "Não identificado"])
     ws2.append(["Mês de referência", mes_label])
+    if avisos_mes:
+        for av in avisos_mes:
+            ws2.append(["⚠️ ALERTA DE COMPETÊNCIA/PASTA", av])
+            cel_a = ws2.cell(row=ws2.max_row, column=1)
+            cel_b = ws2.cell(row=ws2.max_row, column=2)
+            cel_a.font = Font(bold=True, color="9C0006")
+            cel_a.fill = PatternFill("solid", fgColor="FFC7CE")
+            cel_b.font = Font(bold=True, color="9C0006")
+            cel_b.fill = PatternFill("solid", fgColor="FFC7CE")
+        ws2.append([])
     ws2.append(["Registros extraídos (secretaria)", total_sec])
     ws2.append(["Registros extraídos (sistema)", total_sis])
     ws2.append(["Total de retificações solicitadas à secretaria", len(ret_divergencias)])
@@ -233,8 +307,14 @@ def gerar_excel(retificacoes, sobreposicoes, caminho_saida, total_sec, total_sis
     wb.save(caminho_saida)
 
 
-def gerar_txt(retificacoes, sobreposicoes, caminho_saida, itens_regularizados=None):
+def gerar_txt(retificacoes, sobreposicoes, caminho_saida, itens_regularizados=None, avisos_mes=None):
     linhas = []
+    if avisos_mes:
+        linhas.append("=== ⚠️ ALERTA: COMPETÊNCIA DIVERGENTE OU ARQUIVO EM PASTA INCORRETA ===")
+        for av in avisos_mes:
+            linhas.append(f"  * {av}")
+        linhas.append("")
+
     if sobreposicoes:
         linhas.append("=== ATENÇÃO: SOBREPOSIÇÃO DE EVENTOS NA MESMA DATA ===")
         for s in sobreposicoes:
@@ -270,11 +350,20 @@ def gerar_txt(retificacoes, sobreposicoes, caminho_saida, itens_regularizados=No
         f.write("\n".join(linhas) + "\n")
 
 
-def gerar_markdown(retificacoes, sobreposicoes, caminho_saida, mes_label, total_sec, total_sis, nome_orgao="", secao_memorando=None, itens_regularizados=None):
+def gerar_markdown(retificacoes, sobreposicoes, caminho_saida, mes_label, total_sec, total_sis, nome_orgao="", secao_memorando=None, itens_regularizados=None, avisos_mes=None):
     linhas = []
     titulo = f"# Retificações de Frequência — {nome_orgao} ({mes_label})" if nome_orgao else f"# Retificações de Frequência ({mes_label})"
     linhas.append(titulo)
     linhas.append("")
+    if avisos_mes:
+        linhas.append("> [!CAUTION]")
+        linhas.append("> ### ⚠️ ALERTA: ARQUIVO COM COMPETÊNCIA DIVERGENTE OU PASTA INCORRETA")
+        linhas.append("> Foram identificadas divergências de mês de competência nos documentos analisados:")
+        for av in avisos_mes:
+            linhas.append(f"> - {av}")
+        linhas.append(">")
+        linhas.append("> *Atenção: Os lançamentos foram filtrados para o mês do lote. Se os documentos forem de meses distintos ou estiverem na pasta incorreta, os resultados da conferência podem conter falsas divergências ou dados faltantes.*")
+        linhas.append("")
     linhas.append(f"- Gerado em: {datetime.now().strftime('%d/%m/%Y %H:%M')}")
     if nome_orgao:
         linhas.append(f"- Órgão / Secretaria: {nome_orgao}")
@@ -368,16 +457,25 @@ def processar_par(caminho_secretaria, caminho_sistema, ano_mes=None, desligados=
     if desligados is None:
         desligados, _ = localizar_e_carregar_desligados(INPUT_DIR)
 
+    # Identificar mês esperado da pasta (se aplicável)
+    ano_mes_pasta = ano_mes
+    p_nome = pasta_saida_mes or caminho_secretaria.parent.name
+    if ano_mes_pasta is None and p_nome and re.match(r"^\d{4}-\d{2}$", p_nome):
+        a_str, m_str = p_nome.split("-")
+        ano_mes_pasta = (int(a_str), int(m_str))
+
     print("\n" + "=" * 65)
     print(f"PROCESSANDO CONFERÊNCIA:")
     print(f"  Secretaria: {caminho_secretaria.name}")
     print(f"  Sistema:    {caminho_sistema.name}")
+    if ano_mes_pasta:
+        print(f"  Lote/Pasta: {formatar_mes_ano(ano_mes_pasta)}")
     print("=" * 65)
 
     # 1. Extrair cabeçalho da secretaria (código, nome e mês/ano)
     codigo_sec, nome_sec, mes_cabecalho = extrair_cabecalho(str(caminho_secretaria))
-    if ano_mes is None and mes_cabecalho:
-        ano_mes = mes_cabecalho
+    if ano_mes is None:
+        ano_mes = ano_mes_pasta or mes_cabecalho
 
     if codigo_sec and nome_sec:
         nome_orgao = f"{codigo_sec} - {nome_sec}"
@@ -396,10 +494,33 @@ def processar_par(caminho_secretaria, caminho_sistema, ano_mes=None, desligados=
     if nao_reconhecidas:
         print(f"  -> {len(nao_reconhecidas)} linha(s) ignorada(s)/ruído")
 
-    # 3. Extrair registros do sistema
+    # 3. Extrair registros do sistema e cabeçalho
     print("Lendo registros do sistema...")
     regs_sis = extrair_sistema(str(caminho_sistema))
     print(f"  -> {len(regs_sis)} registro(s) extraído(s)")
+    info_sis = extrair_cabecalho_sistema(str(caminho_sistema))
+    mes_cabecalho_sis = info_sis.get("ano_mes")
+
+    # 3.1. Validar compatibilidade de meses entre documentos e pasta
+    mes_moda_sec = mes_referencia(regs_sec)
+    mes_moda_sis = mes_referencia_registros(regs_sis, "data_inicial")
+
+    avisos_mes = validar_competencia_documentos(
+        ano_mes_esperado=ano_mes_pasta,
+        mes_cabecalho_sec=mes_cabecalho,
+        mes_moda_sec=mes_moda_sec,
+        mes_cabecalho_sis=mes_cabecalho_sis,
+        mes_moda_sis=mes_moda_sis,
+        nome_sec_pdf=caminho_secretaria.name,
+        nome_sis_pdf=caminho_sistema.name,
+    )
+    if avisos_mes:
+        print("\n" + "!" * 65)
+        print("⚠️  [ALERTA: DIVERGÊNCIA DE COMPETÊNCIA / ARQUIVO NA PASTA ERRADA]")
+        for av in avisos_mes:
+            print(f"  • {av}")
+        print("  -> Atenção: Os resultados da conferência podem conter distorções!")
+        print("!" * 65 + "\n")
 
     # 4. Comparar dia a dia
     retificacoes, sobreposicoes, (ano_ref, mes_ref) = comparar_por_dia(
@@ -460,17 +581,17 @@ def processar_par(caminho_secretaria, caminho_sistema, ano_mes=None, desligados=
 
     nome_saida = sanitizar_nome_arquivo(nome_orgao)
     caminho_xlsx = dir_conferencia / f"conferencia_{nome_saida}.xlsx"
-    gerar_excel(retificacoes, sobreposicoes, str(caminho_xlsx), len(regs_sec), len(regs_sis), mes_label, nome_orgao=nome_orgao, itens_regularizados=itens_atendidos_memo)
+    gerar_excel(retificacoes, sobreposicoes, str(caminho_xlsx), len(regs_sec), len(regs_sis), mes_label, nome_orgao=nome_orgao, itens_regularizados=itens_atendidos_memo, avisos_mes=avisos_mes)
     print(f"[OK] Excel salvo em: {caminho_xlsx.relative_to(BASE_DIR)}")
 
     caminho_md = dir_retificacoes / f"retificacoes_{nome_saida}.md"
     caminho_txt = dir_retificacoes / f"retificacoes_{nome_saida}.txt"
 
-    if retificacoes or sobreposicoes or secao_memo:
-        gerar_markdown(retificacoes, sobreposicoes, str(caminho_md), mes_label, len(regs_sec), len(regs_sis), nome_orgao=nome_orgao, secao_memorando=secao_memo, itens_regularizados=itens_atendidos_memo)
+    if retificacoes or sobreposicoes or secao_memo or avisos_mes:
+        gerar_markdown(retificacoes, sobreposicoes, str(caminho_md), mes_label, len(regs_sec), len(regs_sis), nome_orgao=nome_orgao, secao_memorando=secao_memo, itens_regularizados=itens_atendidos_memo, avisos_mes=avisos_mes)
         print(f"[OK] Markdown salvo em: {caminho_md.relative_to(BASE_DIR)}")
 
-        gerar_txt(retificacoes, sobreposicoes, str(caminho_txt), itens_regularizados=itens_atendidos_memo)
+        gerar_txt(retificacoes, sobreposicoes, str(caminho_txt), itens_regularizados=itens_atendidos_memo, avisos_mes=avisos_mes)
         print(f"[OK] Texto puro salvo em: {caminho_txt.relative_to(BASE_DIR)}")
     else:
         if caminho_md.exists():
@@ -488,13 +609,11 @@ def processar_par(caminho_secretaria, caminho_sistema, ano_mes=None, desligados=
     dados_monit = apurar_dados_monitoramento(regs_sec_monit, regs_sis, regularizados=regularizados)
     if dados_monit["atrasos"] or dados_monit["faltas"] or dados_monit.get("regularizados"):
         caminho_monit_md = dir_monitoramento / f"monitoramento_{nome_saida}.md"
-        gerar_markdown_monitoramento(dados_monit, str(caminho_monit_md), mes_label, nome_orgao=nome_orgao)
+        gerar_markdown_monitoramento(dados_monit, str(caminho_monit_md), mes_label, nome_orgao=nome_orgao, avisos_mes=avisos_mes)
         print(f"[OK] Monitoramento Markdown: {caminho_monit_md.relative_to(BASE_DIR)}")
 
         caminho_monit_xlsx = dir_monitoramento / f"monitoramento_{nome_saida}.xlsx"
-        gerar_excel_monitoramento(dados_monit, str(caminho_monit_xlsx), mes_label, nome_orgao=nome_orgao)
-        print(f"[OK] Monitoramento Excel:    {caminho_monit_xlsx.relative_to(BASE_DIR)}")
-        gerar_excel_monitoramento(dados_monit, str(caminho_monit_xlsx), mes_label, nome_orgao=nome_orgao)
+        gerar_excel_monitoramento(dados_monit, str(caminho_monit_xlsx), mes_label, nome_orgao=nome_orgao, avisos_mes=avisos_mes)
         print(f"[OK] Monitoramento Excel:    {caminho_monit_xlsx.relative_to(BASE_DIR)}")
 
     return {
@@ -506,6 +625,7 @@ def processar_par(caminho_secretaria, caminho_sistema, ano_mes=None, desligados=
         "retificacoes": len(retificacoes),
         "atrasos_minutos": dados_monit["resumo"]["total_minutos"],
         "faltas_acumuladas": dados_monit["resumo"]["total_dias_faltas"],
+        "avisos_mes": avisos_mes,
     }
 
 
@@ -650,20 +770,28 @@ def selecionar_lotes_interativo(lotes_disponiveis):
 
 
 def main():
-    args = [a for a in sys.argv[1:] if not a.startswith("--")]
-
+    args_raw = sys.argv[1:]
     ano_mes = None
     mes_filtro = None
-    modo_todos = "--todos" in sys.argv
-    modo_ultimo = "--ultimo" in sys.argv
+    modo_todos = "--todos" in args_raw
+    modo_ultimo = "--ultimo" in args_raw
 
-    if "--mes" in sys.argv:
-        valor = sys.argv[sys.argv.index("--mes") + 1]
-        mes_filtro = valor
-        if "-" in valor:
-            ano_str, mes_str = valor.split("-", 1)
-            if ano_str.isdigit() and mes_str.isdigit():
-                ano_mes = (int(ano_str), int(mes_str))
+    args = []
+    i = 0
+    while i < len(args_raw):
+        a = args_raw[i]
+        if a == "--mes" and i + 1 < len(args_raw):
+            mes_filtro = args_raw[i + 1]
+            if "-" in mes_filtro:
+                ano_str, mes_str = mes_filtro.split("-", 1)
+                if ano_str.isdigit() and mes_str.isdigit():
+                    ano_mes = (int(ano_str), int(mes_str))
+            i += 2
+        elif a.startswith("--"):
+            i += 1
+        else:
+            args.append(a)
+            i += 1
 
     desligados, arq_desligados = localizar_e_carregar_desligados(INPUT_DIR)
 
@@ -707,8 +835,13 @@ def main():
             pares = lote["pares"]
             print(f"\n>>> INICIANDO LOTE: {mes_id or 'raiz'} ({len(pares)} pares) <<<")
 
+            ano_mes_lote = ano_mes
+            if ano_mes_lote is None and mes_id and re.match(r"^\d{4}-\d{2}$", mes_id):
+                a_str, m_str = mes_id.split("-")
+                ano_mes_lote = (int(a_str), int(m_str))
+
             for sec, sis in pares:
-                res = processar_par(sec, sis, ano_mes=ano_mes, desligados=desligados, pasta_saida_mes=mes_id)
+                res = processar_par(sec, sis, ano_mes=ano_mes_lote, desligados=desligados, pasta_saida_mes=mes_id)
                 todos_resultados.append(res)
 
         print("\n" + "#" * 65)
@@ -722,7 +855,11 @@ def main():
                 detalhe_extras.append(f"Faltas: {r['faltas_acumuladas']} dia(s)")
             extras_str = f" | {' | '.join(detalhe_extras)}" if detalhe_extras else ""
             pasta_info = f" [{r['pasta_mes']}]" if r.get("pasta_mes") else ""
-            print(f"  *{pasta_info} {r['orgao']} ({r['mes']}): {r['retificacoes']} retificação(ões){extras_str}")
+            aviso_flag = " ⚠️ [MÊS DIVERGENTE]" if r.get("avisos_mes") else ""
+            print(f"  *{pasta_info} {r['orgao']} ({r['mes']}): {r['retificacoes']} retificação(ões){extras_str}{aviso_flag}")
+            if r.get("avisos_mes"):
+                for av in r["avisos_mes"]:
+                    print(f"     -> ⚠️ {av}")
         print("#" * 65 + "\n")
 
         # Atualiza automaticamente a base consolidada para o Power BI

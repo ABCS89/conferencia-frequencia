@@ -91,17 +91,22 @@ def _parse_data(txt):
         return None
 
 
-def mes_referencia(regs_secretaria):
-    """Descobre o mês/ano de referência do relatório a partir da moda das
-    datas dos registros da secretaria. Retorna (ano, mes) ou None."""
+def mes_referencia_registros(registros, campo_data="data"):
+    """Descobre o mês/ano de referência a partir da moda das datas dos registros.
+    Retorna (ano, mes) ou None."""
     contagem = Counter()
-    for r in regs_secretaria:
-        d = _parse_data(r.get("data"))
+    for r in registros:
+        d = _parse_data(r.get(campo_data))
         if d:
             contagem[(d.year, d.month)] += 1
     if not contagem:
         return None
     return contagem.most_common(1)[0][0]
+
+
+def mes_referencia(regs_secretaria):
+    """Descobre o mês/ano de referência do relatório da secretaria. Retorna (ano, mes) ou None."""
+    return mes_referencia_registros(regs_secretaria, campo_data="data")
 
 
 def _limites_mes(ano, mes):
