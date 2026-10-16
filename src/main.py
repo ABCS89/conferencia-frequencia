@@ -152,12 +152,12 @@ def _texto_data(r):
 
 
 def _linha_texto(r):
+    dias_val = int(r["dias"]) if isinstance(r.get("dias"), (int, float)) and int(r["dias"]) == r["dias"] else r.get("dias", 1)
+    dias_txt = f"({dias_val} dia{'s' if dias_val != 1 else ''})"
     if r.get("instrucao_direta"):
-        return (f'{r["matricula"]} - {r["nome"]} - {_texto_data(r)} - {r["dias"]} '
-                f'dia{"s" if r["dias"] != 1 else ""} - {r["instrucao_direta"]}')
+        return f'{r["matricula"]} - {r["nome"]} - {r["instrucao_direta"]} - {_texto_data(r)} {dias_txt}'
     obs = f' ({r["observacao"]})' if r.get("observacao") else ""
-    return (f'{r["matricula"]} - {r["nome"]} - {_texto_data(r)} - {r["dias"]} '
-            f'dia{"s" if r["dias"] != 1 else ""} - {r["tipo_secretaria"]} --> {r["tipo_sistema"]}{obs}')
+    return f'{r["matricula"]} - {r["nome"]} - {r["tipo_secretaria"]} --> {r["tipo_sistema"]} - {_texto_data(r)} {dias_txt}{obs}'
 
 
 def _eh_lancamento_somente_sec(r):

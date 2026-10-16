@@ -661,7 +661,8 @@ def gerar_secao_memorando_markdown(resultado_conferencia, dados_memo, nome_arqui
         linhas.append("Os seguintes apontamentos continuam pendentes de regularização:")
         for p in pend_reais:
             dt_txt = f"{p['data_inicio'].strftime('%d/%m/%Y')} a {p['data_fim'].strftime('%d/%m/%Y')}" if p['data_inicio'] != p['data_fim'] else p['data_inicio'].strftime('%d/%m/%Y')
-            linhas.append(f"- {p['matricula']} - {p['nome']} - {dt_txt} - {p['dias']} dia{'s' if p['dias'] != 1 else ''} - {p['tipo_secretaria']} --> {p['tipo_sistema']}")
+            dias_val = int(p["dias"]) if isinstance(p.get("dias"), (int, float)) and int(p["dias"]) == p["dias"] else p.get("dias", 1)
+            linhas.append(f"- {p['matricula']} - {p['nome']} - {p['tipo_secretaria']} --> {p['tipo_sistema']} - {dt_txt} ({dias_val} dia{'s' if dias_val != 1 else ''})")
     else:
         linhas.append("*(Todas as retificações solicitadas à secretaria foram atendidas pelo memorando!)*")
     linhas.append("")
